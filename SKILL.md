@@ -11,6 +11,20 @@ description: Use when a research data-analysis case supplies tabular measurement
 
 不适用：需要位图渲染（PNG/TIFF）、期刊模板排版、交互式仪表盘、图像处理。脚本不依赖 matplotlib，输出矢量 SVG 与完整作图规格。
 
+## Quickstart
+
+包内自带一个合成演示案例，可直接跑通：
+
+```powershell
+python scripts/run_skill.py --case examples/demo-case/case.json --out "$env:TEMP\demo_9562cc8d\result.json" --work "$env:TEMP\demo_9562cc8d\work"
+```
+
+- 演示输入：`examples/demo-case/case.json` + `examples/demo-case/input/measurements.csv`（10 行、3 个 treatment，其中 1 行 score 为空）。
+- 输出：`$env:TEMP\demo_9562cc8d\result.json` 以及同目录可打开的 `figure.svg`；柱状图均值 A=10.6、B=14.233、C=8.15，n 分别为 4/3/2，caption 同步给出。
+- `output_contract` 的 `recommendation`、`aggregates`、`caption` 三个键均非空；同一输入连续两次运行的 result.json 字节一致。
+
+> 数据为合成样本，不代表任何真实实验或官方评测数据。
+
 ## 输入
 
 - `case.json`：`case_id`、`output_contract`；可选 `x_column`、`y_column`、`group_column`、`chart_type`、`journal`。
