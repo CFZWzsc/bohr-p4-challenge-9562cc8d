@@ -1,0 +1,12 @@
+{
+  "case_id": "demo-figure-plan-01",
+  "output_contract": {
+    "recommendation": "object",
+    "aggregates": "object",
+    "caption": "string"
+  },
+  "input_dir": "input",
+  "x_column": "treatment",
+  "y_column": "score",
+  "chart_type": "bar"
+}
