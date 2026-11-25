@@ -15,11 +15,13 @@ from xml.sax.saxutils import escape
 
 MAX_FILES = 200
 MAX_ROWS = 50000
+VIEW_W, VIEW_H = 640, 420
 PATH_KEYS = ("input_dir", "input_root", "materials_dir", "materials", "data_dir", "dataset_dir", "directory", "path", "root")
 SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".venv", "venv", ".cache"}
 MISSING = {"", "na", "n/a", "nan", "none", "null", "nil", "-", "--", "-999", "-9999"}
 DATE_RE = re.compile(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}")
 UNIT_RE = re.compile(r"[\(\[]([^\)\]]{1,24})[\)\]]")
+ID_RE = re.compile(r"(?:^|_)(?:id|code|no|index)(?:_|$)")
 PALETTE = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#000000"]
 ALIASES = {
     "case_id": ["case_id", "caseid", "id"],
@@ -38,6 +40,14 @@ ALIASES = {
     "errors": ["errors", "error"],
     "stats": ["stats", "statistics", "counts"],
 }
+KEYWORD_ROUTES = (
+    (("rec", "chart", "figure"), "recommendation"),
+    (("aggregat", "summar", "values"), "aggregates"),
+    (("caption", "legend"), "caption"),
+    (("encod", "mapping"), "encoding"),
+    (("export", "artifact", "file"), "exports"),
+    (("check", "warn"), "checks"),
+)
 
 
 def norm_key(name):
@@ -114,7 +124,7 @@ def collect(roots, errors, skipped, exclude):
         exclude_key = None
     for root in roots:
         if not root.exists():
-            errors.append("material root not found: %s" % (root.name or str(root)))
+            errors.append("material root not found: %s" % (root.name or "."))
             continue
         if root.is_file():
             paths, root_dir = [root], root.parent
@@ -126,7 +136,7 @@ def collect(roots, errors, skipped, exclude):
                     for fn in sorted(filenames):
                         paths.append(Path(dirpath) / fn)
             except OSError as exc:
-                errors.append("walk failed on %s: %s" % (root.name, exc))
+                errors.append("walk failed on %s: %s" % (root.name, type(exc).__name__))
                 continue
         for path in paths:
             if len(files) >= MAX_FILES:
@@ -164,6 +174,10 @@ def to_float(value):
         return float(str(value).strip().replace(",", ""))
     except (TypeError, ValueError):
         return None
+
+
+def is_id_like(name):
+    return bool(ID_RE.search(str(name).strip().lower()))
 
 
 def infer_types(header, rows):
@@ -204,53 +218,78 @@ def nice_ticks(lo, hi, count=5):
     if hi <= lo:
         hi = lo + 1.0
     span = hi - lo
-    step = 10 ** math.floor(math.log10(span / max(1, count)))
+    raw = span / float(max(1, count))
+    mag = 10 ** math.floor(math.log10(raw))
+    step = mag
     for mult in (1, 2, 2.5, 5, 10):
-        if span / (step * mult) <= count:
-            step *= mult
+        step = mag * mult
+        if span / step <= count:
             break
     start = math.floor(lo / step) * step
-    ticks = []
-    v = start
-    while v <= hi + step * 0.5:
-        ticks.append(round(v, 10))
-        v += step
+    ticks, i = [], 0
+    while start + i * step < hi - 1e-9:
+        ticks.append(round(start + i * step, 10) + 0.0)
+        i += 1
+    ticks.append(round(start + i * step, 10) + 0.0)
     return ticks
 
 
+def fmt1(v):
+    s = "%.1f" % v
+    return "0.0" if s == "-0.0" else s
+
+
+def r6(v):
+    return round(v, 6) + 0.0
+
+
 def svg_bar(categories, means, sds, xlabel, ylabel, title):
-    W, H = 640, 420
+    W, H = VIEW_W, VIEW_H
     ml, mr, mt, mb = 72, 24, 56, 84
     pw, ph = W - ml - mr, H - mt - mb
-    ymax = max([m + s for m, s in zip(means, sds)] + [0.0]) or 1.0
-    ymax *= 1.1
-    ticks = nice_ticks(0, ymax)
-    ymax = max(ticks[-1], ymax)
+    lows = [m - s for m, s in zip(means, sds)] + [0.0]
+    highs = [m + s for m, s in zip(means, sds)] + [0.0]
+    lo, hi = min(lows), max(highs)
+    if hi <= lo:
+        hi = lo + 1.0
+    ticks = nice_ticks(lo, hi)
+    ymin, ymax = ticks[0], ticks[-1]
+    if ymax <= ymin:
+        ymax = ymin + 1.0
+
+    def sy(v):
+        return mt + ph - (v - ymin) / (ymax - ymin) * ph
+
+    def clampi(v):
+        return max(mt, min(mt + ph, v))
+
     out = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" role="img">' % (W, H, W, H),
-           '<rect width="100%" height="100%" fill="#ffffff"/>',
+           '<rect x="0" y="0" width="%d" height="%d" fill="#ffffff"/>' % (W, H),
            '<text x="%d" y="26" font-family="Arial, Helvetica, sans-serif" font-size="15" fill="#1a1a1a">%s</text>' % (ml, escape(title))]
     for t in ticks:
-        y = mt + ph - (t / ymax) * ph
-        out.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#e6e6e6" stroke-width="1"/>' % (ml, y, ml + pw, y))
-        out.append('<text x="%d" y="%.1f" text-anchor="end" font-family="Arial" font-size="11" fill="#4d4d4d">%g</text>' % (ml - 8, y + 4, t))
+        y = sy(t)
+        out.append('<line x1="%d" y1="%s" x2="%d" y2="%s" stroke="#e6e6e6" stroke-width="1"/>' % (ml, fmt1(y), ml + pw, fmt1(y)))
+        out.append('<text x="%d" y="%s" text-anchor="end" font-family="Arial" font-size="11" fill="#4d4d4d">%g</text>' % (ml - 8, fmt1(y + 4), t))
     n = max(1, len(categories))
     slot = pw / float(n)
     bw = min(56.0, slot * 0.6)
+    zero = sy(0.0)
     for i, cat in enumerate(categories):
         x = ml + slot * i + (slot - bw) / 2.0
-        h = (means[i] / ymax) * ph if ymax else 0
-        y = mt + ph - h
-        out.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>' % (x, y, bw, h, PALETTE[i % 5]))
+        top = clampi(sy(means[i]))
+        y = min(top, zero)
+        h = min(abs(zero - top), mt + ph - y)
+        out.append('<rect x="%s" y="%s" width="%s" height="%s" fill="%s"/>' % (fmt1(x), fmt1(y), fmt1(bw), fmt1(max(0.0, h)), PALETTE[i % 5]))
         if sds[i] and sds[i] > 0:
-            e0 = mt + ph - ((means[i] - sds[i]) / ymax) * ph if ymax else y
-            e1 = mt + ph - ((means[i] + sds[i]) / ymax) * ph if ymax else y
+            e0 = clampi(sy(means[i] - sds[i]))
+            e1 = clampi(sy(means[i] + sds[i]))
             xc = x + bw / 2.0
-            out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#333" stroke-width="1.2"/>' % (xc, e1, xc, e0))
-            out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#333" stroke-width="1.2"/>' % (xc - 5, e1, xc + 5, e1))
-            out.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#333" stroke-width="1.2"/>' % (xc - 5, e0, xc + 5, e0))
+            out.append('<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="#333" stroke-width="1.2"/>' % (fmt1(xc), fmt1(e1), fmt1(xc), fmt1(e0)))
+            out.append('<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="#333" stroke-width="1.2"/>' % (fmt1(xc - 5), fmt1(e1), fmt1(xc + 5), fmt1(e1)))
+            out.append('<line x1="%s" y1="%s" x2="%s" y2="%s" stroke="#333" stroke-width="1.2"/>' % (fmt1(xc - 5), fmt1(e0), fmt1(xc + 5), fmt1(e0)))
         label = cat if len(cat) <= 12 else cat[:11] + "…"
-        out.append('<text x="%.1f" y="%d" text-anchor="middle" font-family="Arial" font-size="11" fill="#1a1a1a">%s</text>' % (x + bw / 2.0, mt + ph + 18, escape(label)))
-    out.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#333" stroke-width="1"/>' % (ml, mt + ph, ml + pw, mt + ph))
+        out.append('<text x="%s" y="%d" text-anchor="middle" font-family="Arial" font-size="11" fill="#1a1a1a">%s</text>' % (fmt1(x + bw / 2.0), mt + ph + 18, escape(label)))
+    out.append('<line x1="%d" y1="%s" x2="%d" y2="%s" stroke="#333" stroke-width="1"/>' % (ml, fmt1(zero), ml + pw, fmt1(zero)))
     out.append('<text x="%d" y="%d" text-anchor="middle" font-family="Arial" font-size="12" fill="#1a1a1a">%s</text>' % (ml + pw / 2, H - 26, escape(xlabel)))
     out.append('<text transform="translate(18,%d) rotate(-90)" text-anchor="middle" font-family="Arial" font-size="12" fill="#1a1a1a">%s</text>' % (mt + ph / 2, escape(ylabel)))
     out.append('</svg>')
@@ -258,7 +297,7 @@ def svg_bar(categories, means, sds, xlabel, ylabel, title):
 
 
 def svg_points(xs, ys, xlabel, ylabel, title, connect):
-    W, H = 640, 420
+    W, H = VIEW_W, VIEW_H
     ml, mr, mt, mb = 72, 24, 56, 72
     pw, ph = W - ml - mr, H - mt - mb
     xmin, xmax = min(xs), max(xs)
@@ -274,19 +313,19 @@ def svg_points(xs, ys, xlabel, ylabel, title, connect):
     def sy(y):
         return mt + ph - (y - ymin) / (ymax - ymin) * ph
     out = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" role="img">' % (W, H, W, H),
-           '<rect width="100%" height="100%" fill="#ffffff"/>',
+           '<rect x="0" y="0" width="%d" height="%d" fill="#ffffff"/>' % (W, H),
            '<text x="%d" y="26" font-family="Arial" font-size="15" fill="#1a1a1a">%s</text>' % (ml, escape(title))]
     for t in yt:
-        out.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#e6e6e6"/>' % (ml, sy(t), ml + pw, sy(t)))
-        out.append('<text x="%d" y="%.1f" text-anchor="end" font-family="Arial" font-size="11" fill="#4d4d4d">%g</text>' % (ml - 8, sy(t) + 4, t))
+        out.append('<line x1="%d" y1="%s" x2="%d" y2="%s" stroke="#e6e6e6"/>' % (ml, fmt1(sy(t)), ml + pw, fmt1(sy(t))))
+        out.append('<text x="%d" y="%s" text-anchor="end" font-family="Arial" font-size="11" fill="#4d4d4d">%g</text>' % (ml - 8, fmt1(sy(t) + 4), t))
     for t in xt:
-        out.append('<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" stroke="#e6e6e6"/>' % (sx(t), mt, sx(t), mt + ph))
-        out.append('<text x="%.1f" y="%d" text-anchor="middle" font-family="Arial" font-size="11" fill="#4d4d4d">%g</text>' % (sx(t), mt + ph + 18, t))
+        out.append('<line x1="%s" y1="%d" x2="%s" y2="%d" stroke="#e6e6e6"/>' % (fmt1(sx(t)), mt, fmt1(sx(t)), mt + ph))
+        out.append('<text x="%s" y="%d" text-anchor="middle" font-family="Arial" font-size="11" fill="#4d4d4d">%g</text>' % (fmt1(sx(t)), mt + ph + 18, t))
     if connect:
-        pts = " ".join("%.1f,%.1f" % (sx(x), sy(y)) for x, y in sorted(zip(xs, ys)))
+        pts = " ".join("%s,%s" % (fmt1(sx(x)), fmt1(sy(y))) for x, y in sorted(zip(xs, ys)))
         out.append('<polyline points="%s" fill="none" stroke="%s" stroke-width="1.6"/>' % (pts, PALETTE[0]))
     for x, y in zip(xs, ys):
-        out.append('<circle cx="%.1f" cy="%.1f" r="3.2" fill="%s" fill-opacity="0.75"/>' % (sx(x), sy(y), PALETTE[0]))
+        out.append('<circle cx="%s" cy="%s" r="3.2" fill="%s" fill-opacity="0.75"/>' % (fmt1(sx(x)), fmt1(sy(y)), PALETTE[0]))
     out.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#333"/>' % (ml, mt + ph, ml + pw, mt + ph))
     out.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#333"/>' % (ml, mt, ml, mt + ph))
     out.append('<text x="%d" y="%d" text-anchor="middle" font-family="Arial" font-size="12" fill="#1a1a1a">%s</text>' % (ml + pw / 2, H - 26, escape(xlabel)))
@@ -317,12 +356,106 @@ def linreg(xs, ys):
     return {"slope": slope, "intercept": intercept, "r_squared": r2}
 
 
+def numeric_scan(rows, idx):
+    """Split one column into finite numeric values and excluded (row, token) pairs."""
+    kept, excluded = [], []
+    for i, r in enumerate(rows):
+        tok = r[idx].strip().lower()
+        if tok in MISSING:
+            excluded.append((i + 1, tok))
+            continue
+        val = to_float(tok)
+        if val is None or not math.isfinite(val):
+            excluded.append((i + 1, tok))
+            continue
+        kept.append((i + 1, val))
+    return kept, excluded
+
+
+def quantile(vals, q):
+    n = len(vals)
+    pos = (n - 1) * q
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return vals[lo] + (vals[hi] - vals[lo]) * frac
+
+
+def rect_bounds(svg, width, height):
+    """Parse every <rect> and report geometry plus any viewBox violations."""
+    count, violations, extent = 0, [], None
+    for m in re.finditer(r"<rect\b[^>]*>", svg):
+        attrs = {}
+        for am in re.finditer(r'([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*"([^"]*)"', m.group(0)):
+            attrs[am.group(1)] = am.group(2)
+        geom = []
+        for key in ("x", "y", "width", "height"):
+            raw = attrs.get(key)
+            if raw is None:
+                geom.append(0.0)
+                continue
+            raw = raw.strip()
+            try:
+                if raw.endswith("%"):
+                    geom.append(float(raw[:-1]) / 100.0 * (width if key in ("x", "width") else height))
+                else:
+                    geom.append(float(raw))
+            except ValueError:
+                geom = None
+                break
+        if geom is None:
+            violations.append({"rect": m.group(0)[:60], "reason": "non-numeric geometry"})
+            continue
+        x, y, w, h = geom
+        count += 1
+        x2, y2 = x + w, y + h
+        if x < -0.01 or y < -0.01 or w < -1e-9 or h < -1e-9 or x2 > width + 0.01 or y2 > height + 0.01:
+            violations.append({"rect": [r6(x), r6(y), r6(w), r6(h)]})
+        if extent is None:
+            extent = [x, y, x2, y2]
+        else:
+            extent = [min(extent[0], x), min(extent[1], y), max(extent[2], x2), max(extent[3], y2)]
+    if extent is None:
+        extent = [0.0, 0.0, 0.0, 0.0]
+    return {"count": count, "violations": violations, "extent": [r6(v) for v in extent]}
+
+
 def resolve_field(field, payload):
     key = norm_key(field)
     for canonical, names in ALIASES.items():
         if key == canonical or key in names:
             return canonical, payload.get(canonical)
+    for prefixes, canonical in KEYWORD_ROUTES:
+        if any(key.startswith(p) for p in prefixes):
+            return canonical, payload.get(canonical)
     return None, None
+
+
+def pick_y_column(cols, x_col):
+    for c in cols:
+        if c["type"] == "numeric" and c["name"] != x_col and not is_id_like(c["name"]) and c["distinct"] >= 2:
+            return c["name"]
+    return None
+
+
+def pick_x_column(cols, row_count, y_col):
+    cats = [c for c in cols if c["type"] == "categorical" and 2 <= c["distinct"] <= 10
+            and c["distinct"] < row_count and c["name"] != y_col and not is_id_like(c["name"])]
+    if cats:
+        return cats[0]["name"]
+    dates = [c for c in cols if c["type"] == "datetime" and c["name"] != y_col
+             and c["distinct"] >= 2 and not is_id_like(c["name"])]
+    if dates:
+        return dates[0]["name"]
+    nums = [c for c in cols if c["type"] == "numeric" and c["name"] != y_col
+            and not is_id_like(c["name"]) and 2 < c["distinct"] < row_count]
+    if nums:
+        return nums[0]["name"]
+    nums = [c for c in cols if c["type"] == "numeric" and c["name"] != y_col
+            and not is_id_like(c["name"]) and c["distinct"] >= 3]
+    if nums:
+        return nums[0]["name"]
+    return None
 
 
 def main(argv=None):
@@ -341,7 +474,8 @@ def main(argv=None):
         if not isinstance(case, dict):
             raise ValueError("case.json root is not an object")
     except (OSError, ValueError) as exc:
-        errors.append("cannot read case.json: %s" % exc)
+        detail = getattr(exc, "strerror", None) or type(exc).__name__
+        errors.append("cannot read case.json: %s" % detail)
         case, status = {}, "failed"
 
     case_id = case.get("case_id") if isinstance(case.get("case_id"), str) else "unknown"
@@ -357,7 +491,7 @@ def main(argv=None):
                 raw = path.read_bytes()
                 text, enc = decode(raw)
             except OSError as exc:
-                skipped.append({"path": rel, "reason": "unreadable: %s" % exc})
+                skipped.append({"path": rel, "reason": "unreadable: %s" % type(exc).__name__})
                 continue
             line = text.splitlines()[0] if text else ""
             delim = "\t" if ext == ".tsv" else max([",", "\t", ";"], key=lambda d: line.count(d))
@@ -373,41 +507,85 @@ def main(argv=None):
 
     recommendation, encoding, aggregates, labels, caption = {}, {}, {}, {}, ""
     style, checks, exports, svg = {}, [], {}, None
+    excluded_count = 0
     if status != "failed":
         if not rows:
             status = "insufficient_input"
         else:
             cols = infer_types(header, rows)
             numeric = [c for c in cols if c["type"] == "numeric"]
-            categorical = [c for c in cols if c["type"] == "categorical"]
-            datetime = [c for c in cols if c["type"] == "datetime"]
-            x_col = case.get("x_column") if case.get("x_column") in header else None
-            y_col = case.get("y_column") if case.get("y_column") in header else None
+            x_col = None
+            for key in ("group_column", "x_column"):
+                cand = case.get(key)
+                if isinstance(cand, str) and cand in header:
+                    x_col = cand
+                    break
+            y_col = None
+            for key in ("y_column", "value_column"):
+                cand = case.get(key)
+                if isinstance(cand, str) and cand in header:
+                    y_col = cand
+                    break
+            numeric_names = [c["name"] for c in numeric
+                             if not is_id_like(c["name"]) and c["distinct"] >= 2]
+            if (x_col is None and y_col is None and len(numeric_names) >= 2
+                    and not any(c["type"] in ("categorical", "datetime") for c in cols)):
+                x_col, y_col = numeric_names[0], numeric_names[1]
             if not y_col:
-                y_col = numeric[0]["name"] if numeric else None
+                y_col = pick_y_column(cols, x_col)
             if not x_col:
-                if categorical:
-                    x_col = categorical[0]["name"]
-                elif datetime:
-                    x_col = datetime[0]["name"]
-                elif len(numeric) >= 2:
-                    x_col = numeric[0]["name"]
-                    y_col = numeric[1]["name"]
-                elif numeric:
-                    x_col = numeric[0]["name"]
-                    y_col = None
+                x_col = pick_x_column(cols, len(rows), y_col)
+            if x_col is not None and x_col == y_col:
+                x_col = None
+
             chart = case.get("chart_type")
-            if not chart:
+            xtype = next((c["type"] for c in cols if c["name"] == x_col), None)
+            if chart not in ("bar", "grouped_bar", "scatter", "line", "histogram"):
                 if y_col is None:
                     chart = "category_count_bar"
-                elif x_col and any(c["name"] == x_col and c["type"] == "datetime" for c in cols):
+                elif x_col is None:
+                    chart = "histogram"
+                elif xtype == "datetime":
                     chart = "line"
-                elif x_col and any(c["name"] == x_col and c["type"] == "numeric" for c in cols):
+                elif xtype == "numeric":
                     chart = "scatter"
-                elif x_col and any(c["name"] == x_col and c["type"] == "categorical" for c in cols):
+                elif xtype == "categorical":
                     chart = "bar"
                 else:
                     chart = "histogram"
+            elif chart in ("bar", "grouped_bar", "scatter", "line") and (x_col is None or y_col is None):
+                chart = "histogram" if y_col else "category_count_bar"
+
+            y_idx = header.index(y_col) if y_col else None
+            kept, excluded = numeric_scan(rows, y_idx) if y_idx is not None else ([], [])
+            excluded_count = len(excluded)
+            hygiene_note = ""
+            outlier_head = None
+            plot_kept = kept
+            if excluded:
+                checks.append({"check": "sentinel_excluded", "column": y_col,
+                               "tokens": sorted({tok for _, tok in excluded}),
+                               "rows": [rno for rno, _ in excluded], "status": "warn",
+                               "action": "excluded before aggregation; row numbers are 1-based data rows"})
+                hygiene_note += " Excluded %d missing/sentinel value(s) in %s before aggregation." % (len(excluded), y_col)
+            if kept:
+                vals = sorted(v for _, v in kept)
+                q1, q3 = quantile(vals, 0.25), quantile(vals, 0.75)
+                bounds_lo, bounds_hi = q1 - 1.5 * (q3 - q1), q3 + 1.5 * (q3 - q1)
+                orows = [rno for rno, v in kept if v < bounds_lo or v > bounds_hi]
+                checks.append({"check": "outlier", "column": y_col, "method": "IQR*1.5", "n": len(vals),
+                               "bounds": [r6(bounds_lo), r6(bounds_hi)], "rows": orows,
+                               "status": "warn" if orows else "ok",
+                               "action": "flagged and excluded from plotted values; raw data unchanged"})
+                outlier_head = {"lo": bounds_lo, "hi": bounds_hi, "rows": orows}
+                if orows:
+                    plot_kept = [(rno, v) for rno, v in kept if rno not in set(orows)]
+                    hygiene_note += (" %d IQR*1.5 outlier(s) (rows %s; bounds %g to %g) are excluded from the "
+                                     "plotted values; raw data unchanged."
+                                     % (len(orows), ", ".join(str(r) for r in orows),
+                                        round(bounds_lo, 6), round(bounds_hi, 6)))
+                else:
+                    hygiene_note += " No IQR*1.5 outliers were detected; all valid values are included."
 
             if y_col is None and x_col:
                 idx = header.index(x_col)
@@ -424,8 +602,7 @@ def main(argv=None):
                 svg = svg_bar(cats, means, sds, x_col, "Count", "%s by %s" % ("Count", x_col))
                 status = "partial"
             elif chart == "histogram":
-                idx = header.index(y_col)
-                vals = [to_float(r[idx]) for r in rows if to_float(r[idx]) is not None]
+                vals = [v for _, v in plot_kept]
                 if not vals:
                     status = "insufficient_input"
                 else:
@@ -439,18 +616,19 @@ def main(argv=None):
                         j = min(k - 1, int((v - lo) / width))
                         counts[j] += 1
                     for j in range(k):
-                        bins.append([lo + j * width, lo + (j + 1) * width])
+                        bins.append([r6(lo + j * width), r6(lo + (j + 1) * width)])
                     aggregates = {"mode": "histogram", "bins": bins, "counts": counts,
                                   "n": len(vals), "bin_rule": "Sturges"}
                     labels = {"x": y_col, "y": "Frequency", "units": {y_col: next((c["unit"] for c in cols if c["name"] == y_col), None)},
                               "full_labels": {}}
-                    caption = "Histogram of %s (n=%d, Sturges bins=%d)." % (y_col, len(vals), k)
+                    caption = "Histogram of %s (n=%d, Sturges bins=%d).%s" % (y_col, len(vals), k, hygiene_note)
                     svg = svg_hist(bins, counts, y_col, "Frequency", "Distribution of %s" % y_col)
             elif chart in ("bar", "grouped_bar"):
                 xi, yi = header.index(x_col), header.index(y_col)
+                val_by_row = dict(plot_kept)
                 groups = {}
-                for r in rows:
-                    v = to_float(r[yi])
+                for i, r in enumerate(rows):
+                    v = val_by_row.get(i + 1)
                     if v is None:
                         continue
                     groups.setdefault(r[xi].strip() or "missing", []).append(v)
@@ -458,27 +636,38 @@ def main(argv=None):
                     status = "insufficient_input"
                 else:
                     cats = sorted(groups)
-                    means = [round(mean(groups[c]), 6) for c in cats]
-                    sds = [round(sd(groups[c]), 6) for c in cats]
+                    means = [r6(mean(groups[c])) for c in cats]
+                    sds = [r6(sd(groups[c])) for c in cats]
                     aggregates = {"mode": "mean_sd", "categories": cats, "means": means,
                                   "sd": sds, "n": [len(groups[c]) for c in cats]}
                     labels = {"x": x_col, "y": y_col,
                               "units": {x_col: next((c["unit"] for c in cols if c["name"] == x_col), None),
                                         y_col: next((c["unit"] for c in cols if c["name"] == y_col), None)},
                               "full_labels": {c: c for c in cats}}
-                    caption = ("Mean %s by %s; error bars show ±1 SD; n per group = %s."
-                               % (y_col, x_col, ", ".join(str(len(groups[c])) for c in cats)))
+                    small = [c for c in cats if len(groups[c]) < 2]
+                    for c in small:
+                        checks.append({"check": "group_size", "group": c, "n": len(groups[c]),
+                                       "status": "warn",
+                                       "action": "n<2; SD/error bar undefined for this group"})
+                    if small:
+                        status = "partial"
+                    caption = ("Mean %s by %s; error bars show ±1 SD; n per group = %s.%s"
+                               % (y_col, x_col, ", ".join("%s=%d" % (c, len(groups[c])) for c in cats), hygiene_note))
                     svg = svg_bar(cats, means, sds, x_col, y_col, "%s by %s" % (y_col, x_col))
             else:
                 xi, yi = header.index(x_col), header.index(y_col)
+                val_by_row = dict(plot_kept)
                 pairs = []
-                for r in rows:
-                    xv = to_float(r[xi]) if chart == "scatter" else None
-                    yv = to_float(r[yi])
+                for i, r in enumerate(rows):
+                    yv = val_by_row.get(i + 1)
                     if yv is None:
                         continue
-                    if chart == "scatter" and xv is None:
-                        continue
+                    xv = None
+                    if chart == "scatter":
+                        xtok = r[xi].strip().lower()
+                        xv = None if xtok in MISSING else to_float(xtok)
+                        if xv is None or not math.isfinite(xv):
+                            continue
                     pairs.append((xv, yv, r[xi].strip()))
                 if not pairs:
                     status = "insufficient_input"
@@ -488,25 +677,34 @@ def main(argv=None):
                         ys = [p[1] for p in pairs]
                         fit = linreg(xs, ys)
                         aggregates = {"mode": "points", "n": len(pairs),
-                                      "x_range": [min(xs), max(xs)], "y_range": [min(ys), max(ys)],
+                                      "x_range": [r6(min(xs)), r6(max(xs))],
+                                      "y_range": [r6(min(ys)), r6(max(ys))],
                                       "least_squares": fit}
                         caption = "Scatter of %s versus %s (n=%d)." % (y_col, x_col, len(pairs))
                         if fit:
-                            caption += " Dashed least-squares fit: y=%.4gx+%.4g, R²=%.3f." % (
+                            caption += " Least-squares fit: y=%.4gx+%.4g, R²=%.3f." % (
                                 fit["slope"], fit["intercept"], fit["r_squared"])
+                        caption += hygiene_note
                     else:
                         pairs.sort(key=lambda p: p[2])
                         xs = [i for i in range(1, len(pairs) + 1)]
                         ys = [p[1] for p in pairs]
-                        aggregates = {"mode": "series", "n": len(pairs), "y_range": [min(ys), max(ys)]}
-                        caption = "Line series of %s over %s (n=%d; x order given by source rows)." % (y_col, x_col, len(pairs))
+                        aggregates = {"mode": "series", "n": len(pairs),
+                                      "y_range": [r6(min(ys)), r6(max(ys))]}
+                        caption = ("Line series of %s over %s (n=%d; x order given by source rows).%s"
+                                   % (y_col, x_col, len(pairs), hygiene_note))
                     svg = svg_points([float(x) for x in xs], ys, x_col, y_col,
                                      "%s vs %s" % (y_col, x_col), chart == "line")
 
+            if aggregates and outlier_head and outlier_head["rows"]:
+                aggregates["outliers_excluded"] = {
+                    "method": "IQR*1.5",
+                    "bounds": [r6(outlier_head["lo"]), r6(outlier_head["hi"])],
+                    "rows": outlier_head["rows"]}
             encoding = {"x": x_col, "y": y_col,
-                        "color": "single series" if chart != "bar" else "category hue (Okabe-Ito subset)",
+                        "color": "category hue (Okabe-Ito subset)" if chart in ("bar", "grouped_bar", "category_count_bar") else "single series",
                         "error_bar": "±1 SD (bar) / none (scatter, line)",
-                        "mark": "bar" if chart == "bar" else "point" if chart == "scatter" else "line" if chart == "line" else "bar",
+                        "mark": "bar" if chart in ("bar", "grouped_bar", "histogram", "category_count_bar") else "point" if chart == "scatter" else "line",
                         "scale": "linear"}
             recommendation = {
                 "chart_type": chart,
@@ -518,7 +716,7 @@ def main(argv=None):
                     "histogram": "single numeric variable distribution",
                     "category_count_bar": "no numeric measurement; counts by category",
                 }.get(chart, "rule-based choice"),
-                "alternatives": ["boxplot", "dot plot"] if chart == "bar" else ["histogram"] if chart == "scatter" else [],
+                "alternatives": ["boxplot", "dot plot"] if chart in ("bar", "grouped_bar") else ["histogram"] if chart == "scatter" else [],
             }
             style = {
                 "size_mm": {"single_column": 89, "double_column": 183},
@@ -543,23 +741,32 @@ def main(argv=None):
                 if c["type"] == "numeric" and c["distinct"] == 1:
                     checks.append({"check": "constant_column", "column": c["name"],
                                    "status": "warn", "action": "no variation to display"})
-            if not checks:
-                checks.append({"check": "basic", "status": "ok", "detail": "labels, units and axis titles present"})
 
             exports = {"svg": "figure.svg", "png": None,
                        "png_note": "no rasterizer available in stdlib-only mode; export SVG to PNG at 300 dpi externally"}
             labels["title"] = "%s vs %s" % (y_col, x_col) if y_col else (x_col or "Figure")
 
     if svg and status != "failed":
+        bounds = rect_bounds(svg, VIEW_W, VIEW_H)
+        if bounds["violations"]:
+            checks.append({"check": "svg_bounds", "status": "fail", "rects": bounds["count"],
+                           "viewBox": [0, 0, VIEW_W, VIEW_H], "violations": bounds["violations"]})
+            if status == "success":
+                status = "partial"
+        else:
+            checks.append({"check": "svg_bounds", "status": "ok", "rects": bounds["count"],
+                           "viewBox": [0, 0, VIEW_W, VIEW_H], "extent": bounds["extent"]})
         try:
             out_dir = Path(args.out).parent
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / "figure.svg").write_text(svg, encoding="utf-8")
         except OSError as exc:
-            errors.append("cannot write figure.svg: %s" % exc)
+            errors.append("cannot write figure.svg: %s" % type(exc).__name__)
             exports["svg"] = None
             if status == "success":
                 status = "partial"
+        if not checks:
+            checks.append({"check": "basic", "status": "ok", "detail": "labels, units and axis titles present"})
     elif status != "failed" and not svg and status != "insufficient_input":
         status = "partial"
 
@@ -567,6 +774,7 @@ def main(argv=None):
               "labels": labels, "caption": caption, "style": style, "exports": exports,
               "checks": checks}
     evidence = {"source": source, "column_types": {}, "rows_used": len(rows),
+                "rows_excluded_sentinel": excluded_count,
                 "figure_generator": "hand-written SVG (no matplotlib)", "source_mutation": "none"}
     if status != "failed" and rows:
         evidence["column_types"] = {c["name"]: c["type"] for c in infer_types(header, rows)}
@@ -585,16 +793,25 @@ def main(argv=None):
 
     output = {"case_id": case_id, "status": status, "result": result, "evidence": evidence,
               "uncertainty": uncertainty, "errors": errors, "stats": stats}
-    notes = []
+    extras = {}
     for field in fields:
         canonical, value = resolve_field(field, payload)
         if canonical is None:
             output[field] = None
-            notes.append("%s: no supported producer in this skill; null retained" % field)
+            best = None
+            if field in case:
+                best = case[field]
+            elif norm_key(field) in payload:
+                best = payload[norm_key(field)]
+            if best is None:
+                best = ("no automated producer for this field; "
+                        "see result, evidence and checks")
+            extras[field] = {"value": best,
+                             "reason": "field name does not match any alias or keyword route"}
         else:
             output[field] = value
-    if notes:
-        output["contract_notes"] = notes
+    if extras:
+        output["contract_extras"] = extras
 
     try:
         out_path = Path(args.out)
@@ -603,7 +820,7 @@ def main(argv=None):
             json.dump(output, fh, ensure_ascii=False, indent=2)
             fh.write("\n")
     except OSError as exc:
-        sys.stderr.write("cannot write result: %s\n" % exc)
+        sys.stderr.write("cannot write result: %s\n" % type(exc).__name__)
         return 2
     try:
         work = Path(args.work)
