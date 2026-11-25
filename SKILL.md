@@ -19,24 +19,24 @@ description: Use when a research data-analysis case supplies tabular measurement
 python scripts/run_skill.py --case examples/demo-case/case.json --out "$env:TEMP\demo_9562cc8d\result.json" --work "$env:TEMP\demo_9562cc8d\work"
 ```
 
-- 演示输入：`examples/demo-case/case.json` + `examples/demo-case/input/measurements.csv`（10 行、3 个 treatment，其中 1 行 score 为空）。
-- 输出：`$env:TEMP\demo_9562cc8d\result.json` 以及同目录可打开的 `figure.svg`；柱状图均值 A=10.6、B=14.233、C=8.15，n 分别为 4/3/2，caption 同步给出。
-- `output_contract` 的 `recommendation`、`aggregates`、`caption` 三个键均非空；同一输入连续两次运行的 result.json 字节一致。
+- 演示输入：`examples/demo-case/case.json` + `examples/demo-case/input/measurements.csv`（11 行，列为 sample_id/group/score；含 2 个 -999 哨兵值、1 个 n=1 的组、1 个 250.0 离群值）。
+- 输出：`$env:TEMP\demo_9562cc8d\result.json` 以及同目录可打开的 `figure.svg`；柱状图均值 A=10.6、B=14.233、C=8.4，n 分别为 4/3/1，`status=partial`，caption 同步给出 n、哨兵值与离群值处置。
+- `output_contract` 的 `recommendation`、`aggregates`、`caption` 三个键均非空；同一输入连续两次运行的 result.json 与 figure.svg 字节一致。
 
 > 数据为合成样本，不代表任何真实实验或官方评测数据。
 
 ## 输入
 
-- `case.json`：`case_id`、`output_contract`；可选 `x_column`、`y_column`、`group_column`、`chart_type`、`journal`。
-- 数据：CSV/TSV，自动识别分隔符与编码；数值列允许 80% 可解析；缺失行剔除并计数。
+- `case.json`：`case_id`、`output_contract`；可选 `group_column`/`x_column`、`value_column`/`y_column`、`chart_type`、`journal`。
+- 数据：CSV/TSV，自动识别分隔符与编码；数值列允许 80% 可解析；缺失/哨兵值（如 -999）与 IQR×1.5 离群值不进入绘图聚合，逐行写入 `checks`。
 - 输出：`/app/output/result.json` 与 `/app/output/figure.svg`。
 
 ## 处理流程（对应评分维度）
 
-1. **数据画像（任务完成度）**：逐列判断数值/分类/日期，记录缺失、去重后类别数与样本量；不把 ID 列当连续变量。
+1. **数据画像（任务完成度）**：逐列判断数值/分类/日期，记录缺失、去重后类别数与样本量；`group_column` 优先作为分组轴，ID 类列（名称含 id/code/no/index 或去重数等于行数）不作分组变量。
 2. **图型选择（正确性）**：一个分类 + 一个数值 → 分组柱状图（均值±SD）；两个数值 → 散点图并给出最小二乘拟合；仅一个数值 → 直方图（Sturges 分箱）；日期 + 数值 → 折线图。选择依据写入 `recommendation.rationale`。
-3. **编码与轴（规范性）**：明确 x、y、颜色、误差线含义；轴标题取列名并提取括号内单位；坐标范围按数据留 5% 边距，柱状图从 0 起。
-4. **可读性（质量）**：类别数 ≤ 12；标签截断并保留完整名于 `labels.full_labels`；检查缺失比例、常量列、超出画布的点，写入 `checks`。
+3. **编码与轴（规范性）**：明确 x、y、颜色、误差线含义；轴标题取列名并提取括号内单位；柱状图以 0 为基线（y 轴可含负值），刻度覆盖数据与误差线范围。
+4. **可读性（质量）**：类别数 ≤ 12；标签截断并保留完整名于 `labels.full_labels`；检查缺失比例、常量列、哨兵值、IQR 离群值、组样本量（n<2 记 `partial`）；SVG 生成后回读全部 `<rect>` 校验坐标在 viewBox 内，越界记 `svg_bounds=fail`。
 5. **图注（完整性）**：自动生成含 n、误差定义、统计口径的图注骨架；不写未计算出的显著性星号。
 6. **导出规格（可核验性）**：单栏 89 mm / 双栏 183 mm、300 dpi、字体 Arial/Helvetica 7–9 pt、色盲友好 Okabe-Ito 调色板；SVG 为真实生成文件，PNG 明确标注未生成。
 7. **失败与恢复（可靠体验）**：无数值列时降级为表格/条形计数并说明；空数据、全缺失、列名冲突进入 `errors`、`checks`，不伪造图形。
@@ -46,7 +46,7 @@ python scripts/run_skill.py --case examples/demo-case/case.json --out "$env:TEMP
 | 字段 | 含义 |
 |-|-|
 | `case_id` | 与输入一致 |
-| `output_contract` 各字段 | 命中别名时填真实值，否则 `null` + `contract_notes` |
+| `output_contract` 各字段 | 命中别名或关键词路由时填真实值，否则 `null` + `contract_extras` |
 | `status` | `success` / `partial` / `insufficient_input` / `failed` |
 | `result` | `recommendation`、`encoding`、`aggregates`、`labels`、`caption`、`style`、`exports`、`checks` |
 | `evidence` | 数据文件哈希、列类型、样本量 |
