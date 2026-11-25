@@ -6,7 +6,7 @@
     "caption": "string"
   },
   "input_dir": "input",
-  "x_column": "treatment",
-  "y_column": "score",
+  "group_column": "group",
+  "value_column": "score",
   "chart_type": "bar"
 }
